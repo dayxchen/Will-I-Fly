@@ -47,8 +47,12 @@ class AirportGeoCache:
     def save(self) -> None:
         if not self._cache:
             return
-        os.makedirs(os.path.dirname(self.cache_path) or ".", exist_ok=True)
-        pd.DataFrame(list(self._cache.values())).to_csv(self.cache_path, index=False)
+        try:
+            os.makedirs(os.path.dirname(self.cache_path) or ".", exist_ok=True)
+            pd.DataFrame(list(self._cache.values())).to_csv(self.cache_path, index=False)
+        except OSError:
+            # Filesystem is read-only in this environment (e.g. Vercel serverless) — skip caching
+            pass
 
     def get(self, iata: str) -> Optional[Dict]:
         return self._cache.get(iata.upper())
