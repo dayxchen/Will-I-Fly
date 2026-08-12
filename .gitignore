@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Environment & secrets
+.env
+.env.local
+
+# Generated data & caches
+data/
+*.parquet
+
+# Trained models (regenerate with train_model.py)
+models/*.pkl
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+models/flight_delay_model.pkl
