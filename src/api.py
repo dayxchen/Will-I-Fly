@@ -61,17 +61,13 @@ _config_path = _app_dir / "config.yaml"
 app = FastAPI(title="Flight delay prediction API", version="1.0.0")
 
 app.add_middleware(
-
     CORSMiddleware,
-
-    allow_origins=["*"],
-
-    allow_credentials=True,
-
+    allow_origins=[
+        "https://will-i-fly-frontend.vercel.app",
+        "http://localhost:3000",
+    ],
     allow_methods=["*"],
-
     allow_headers=["*"],
-
 )
 
 _model = None
