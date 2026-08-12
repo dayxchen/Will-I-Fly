@@ -9,6 +9,10 @@ Your website UI can call POST /predict with the request body below.
 """
 
 import os
+import sys
+
+# Ensure local modules in src/ resolve on Vercel (cwd may be project root).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from pathlib import Path
 
