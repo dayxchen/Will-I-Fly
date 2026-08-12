@@ -1,6 +1,8 @@
 """Geocode airports by IATA code and map to model-friendly identifiers."""
+import csv
 import os
-from typing import Dict, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional
 
 import pandas as pd
 import requests
@@ -9,6 +11,7 @@ from weather_fetch import US_STATE_ABBR_TO_NAME
 
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 DEFAULT_COORDS_CACHE = "data/airport_iata_coords.csv"
+AIRPORTS_CSV = Path(__file__).resolve().parent / "airports_iata.csv"
 
 _state_name_to_abbr = {name.lower(): abbr for abbr, name in US_STATE_ABBR_TO_NAME.items()}
 
@@ -31,10 +34,36 @@ def _admin1_to_state_abbr(admin1: Optional[str], country_code: Optional[str]) ->
     return admin1[:2].upper()
 
 
+def _load_static_airports() -> Dict[str, Dict[str, str]]:
+    by_iata: Dict[str, Dict[str, str]] = {}
+    by_icao: Dict[str, Dict[str, str]] = {}
+    if not AIRPORTS_CSV.exists():
+        return {"by_iata": by_iata, "by_icao": by_icao}
+
+    with open(AIRPORTS_CSV, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            record = {
+                "iata": row["iata"].upper(),
+                "icao": row["icao"].upper(),
+                "latitude": row["latitude"],
+                "longitude": row["longitude"],
+                "name": row["name"],
+                "iso_country": row["iso_country"],
+            }
+            by_iata[record["iata"]] = record
+            if record["icao"]:
+                by_icao[record["icao"]] = record
+
+    return {"by_iata": by_iata, "by_icao": by_icao}
+
+
 class AirportGeoCache:
     def __init__(self, cache_path: Optional[str] = None):
         self.cache_path = cache_path or DEFAULT_COORDS_CACHE
         self._cache: Dict[str, Dict] = {}
+        static = _load_static_airports()
+        self._static_by_iata = static["by_iata"]
+        self._static_by_icao = static["by_icao"]
         self._load()
 
     def _load(self) -> None:
@@ -57,33 +86,90 @@ class AirportGeoCache:
     def get(self, iata: str) -> Optional[Dict]:
         return self._cache.get(iata.upper())
 
+    def iata_from_icao(self, icao: Optional[str]) -> Optional[str]:
+        if not icao:
+            return None
+        static = self._static_by_icao.get(icao.upper())
+        return static["iata"] if static else None
+
+    def _record_from_static(
+        self,
+        static: Dict[str, str],
+        airport_name: str,
+        timezone: Optional[str],
+    ) -> Dict:
+        country_code = static["iso_country"]
+        state_abr = country_code if country_code != "US" else "US"
+        return {
+            "iata": static["iata"],
+            "airport_name": airport_name or static["name"],
+            "latitude": float(static["latitude"]),
+            "longitude": float(static["longitude"]),
+            "timezone": timezone or "UTC",
+            "country_code": country_code,
+            "state_abr": state_abr,
+            "airport_id": iata_to_airport_id(static["iata"]),
+        }
+
+    def _geocode_search(
+        self,
+        session: requests.Session,
+        queries: List[str],
+    ) -> Optional[Dict]:
+        seen = set()
+        for query in queries:
+            cleaned = query.strip()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+
+            params = {
+                "name": cleaned,
+                "count": 10,
+                "language": "en",
+                "format": "json",
+            }
+            resp = session.get(GEOCODING_URL, params=params, timeout=15)
+            if resp.status_code != 200:
+                continue
+
+            results = resp.json().get("results") or []
+            if results:
+                return results[0]
+        return None
+
     def resolve(
         self,
         iata: str,
         airport_name: str,
         session: requests.Session,
+        icao: Optional[str] = None,
+        timezone: Optional[str] = None,
     ) -> Optional[Dict]:
         iata = iata.upper()
         cached = self.get(iata)
         if cached:
             return cached
 
+        static = self._static_by_iata.get(iata)
+        if not static and icao:
+            static = self._static_by_icao.get(icao.upper())
+        if static:
+            record = self._record_from_static(static, airport_name, timezone)
+            self._cache[iata] = record
+            return record
+
         search_name = airport_name.split(",")[0].strip()
-        if "airport" not in search_name.lower():
-            search_name = f"{search_name} airport"
+        queries = [
+            airport_name,
+            search_name,
+            f"{search_name} airport",
+            f"{iata} airport",
+        ]
+        if icao:
+            queries.append(f"{icao.upper()} airport")
 
-        params = {
-            "name": search_name,
-            "count": 10,
-            "language": "en",
-            "format": "json",
-        }
-        resp = session.get(GEOCODING_URL, params=params, timeout=15)
-        if resp.status_code != 200:
-            return None
-
-        results = resp.json().get("results") or []
-        match = results[0] if results else None
+        match = self._geocode_search(session, queries)
         if not match:
             return None
 
@@ -94,7 +180,7 @@ class AirportGeoCache:
             "airport_name": airport_name,
             "latitude": float(match["latitude"]),
             "longitude": float(match["longitude"]),
-            "timezone": match.get("timezone", "UTC"),
+            "timezone": timezone or match.get("timezone", "UTC"),
             "country_code": country_code,
             "state_abr": state_abr,
             "airport_id": iata_to_airport_id(iata),
@@ -107,6 +193,7 @@ def fetch_current_weather(
     latitude: float,
     longitude: float,
     session: requests.Session,
+    timezone: Optional[str] = None,
 ) -> Dict[str, float]:
     """Fetch current weather at an airport using Open-Meteo forecast API."""
     params = {
@@ -114,6 +201,7 @@ def fetch_current_weather(
         "longitude": longitude,
         "current": "temperature_2m,wind_speed_10m,precipitation,visibility",
         "wind_speed_unit": "kmh",
+        "timezone": timezone or "auto",
     }
     resp = session.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=20)
     resp.raise_for_status()

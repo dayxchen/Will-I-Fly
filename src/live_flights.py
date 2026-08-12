@@ -103,7 +103,14 @@ class LiveFlightService:
 
     def _select_current_leg(self, flights: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         today = date.today().isoformat()
-        candidates = [f for f in flights if f.get("flight_date") == today] or flights
+        candidates = [f for f in flights if f.get("flight_date") == today]
+        if not candidates:
+            # Timezone/date mismatches happen — fall back to the newest non-cancelled leg.
+            candidates = sorted(
+                flights,
+                key=lambda f: f.get("flight_date") or "",
+                reverse=True,
+            )
 
         candidates = [
             f
@@ -140,8 +147,8 @@ class LiveFlightService:
         live = raw.get("live") or None
         aircraft = raw.get("aircraft") or None
 
-        origin_iata = departure.get("iata") or ""
-        dest_iata = arrival.get("iata") or ""
+        origin_iata = departure.get("iata") or self.airport_geo.iata_from_icao(departure.get("icao")) or ""
+        dest_iata = arrival.get("iata") or self.airport_geo.iata_from_icao(arrival.get("icao")) or ""
         if not origin_iata or not dest_iata:
             raise LookupError("Live flight is missing origin or destination airport codes.")
 
@@ -149,14 +156,25 @@ class LiveFlightService:
             origin_iata,
             departure.get("airport") or origin_iata,
             self.session,
+            icao=departure.get("icao"),
+            timezone=departure.get("timezone"),
         )
         dest_geo = self.airport_geo.resolve(
             dest_iata,
             arrival.get("airport") or dest_iata,
             self.session,
+            icao=arrival.get("icao"),
+            timezone=arrival.get("timezone"),
         )
         if not origin_geo or not dest_geo:
-            raise LookupError("Could not resolve airport location for this flight.")
+            missing = []
+            if not origin_geo:
+                missing.append(origin_iata)
+            if not dest_geo:
+                missing.append(dest_iata)
+            raise LookupError(
+                f"Could not resolve airport location for: {', '.join(missing)}."
+            )
 
         scheduled_dep = departure.get("scheduled")
         dep_dt = _parse_iso_datetime(scheduled_dep, departure.get("timezone"))
@@ -167,11 +185,20 @@ class LiveFlightService:
         dep_delay = _safe_int(departure.get("delay"))
         arr_delay = _safe_int(arrival.get("delay"))
 
-        weather = fetch_current_weather(
-            float(origin_geo["latitude"]),
-            float(origin_geo["longitude"]),
-            self.session,
-        )
+        try:
+            weather = fetch_current_weather(
+                float(origin_geo["latitude"]),
+                float(origin_geo["longitude"]),
+                self.session,
+                timezone=departure.get("timezone"),
+            )
+        except requests.RequestException:
+            weather = {
+                "temperature": 20.0,
+                "wind_speed": 5.0,
+                "precipitation": 0.0,
+                "visibility": 10000.0,
+            }
 
         flight = {
             "source": "live",
