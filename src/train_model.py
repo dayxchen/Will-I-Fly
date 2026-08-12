@@ -101,7 +101,7 @@ def prepare_dataset(
     return X, y, categorical_cols, numeric_cols
 
 
-def build_pipeline(categorical_cols, numeric_cols) -> Pipeline:
+def build_pipeline(categorical_cols, numeric_cols, train_cfg: dict) -> Pipeline:
     categorical_transformer = OneHotEncoder(handle_unknown="ignore")
     numeric_transformer = StandardScaler()
 
@@ -113,11 +113,11 @@ def build_pipeline(categorical_cols, numeric_cols) -> Pipeline:
     )
 
     clf = RandomForestClassifier(
-        n_estimators=200,
-        max_depth=None,
+        n_estimators=train_cfg.get("n_estimators", 200),
+        max_depth=train_cfg.get("max_depth"),
         n_jobs=-1,
         class_weight="balanced",
-        random_state=42,
+        random_state=train_cfg.get("random_state", 42),
     )
 
     model = Pipeline(
@@ -151,6 +151,7 @@ def train_and_evaluate(
     model = build_pipeline(
         categorical_cols=[c for c in X.columns if X[c].dtype == "object"],
         numeric_cols=[c for c in X.columns if X[c].dtype != "object"],
+        train_cfg=train_cfg,
     )
 
     model.fit(X_train, y_train)
@@ -167,9 +168,14 @@ def train_and_evaluate(
     if auc is not None:
         print(f"ROC-AUC: {auc:.3f}")
 
-    os.makedirs(os.path.dirname(model_output_path), exist_ok=True)
-    joblib.dump(model, model_output_path)
-    print(f"Saved trained model to {model_output_path}")
+    os.makedirs(os.path.dirname(model_output_path) or ".", exist_ok=True)
+    compress = train_cfg.get("compress")
+    if compress is not None:
+        joblib.dump(model, model_output_path, compress=int(compress))
+    else:
+        joblib.dump(model, model_output_path)
+    size_mb = os.path.getsize(model_output_path) / (1024 * 1024)
+    print(f"Saved trained model to {model_output_path} ({size_mb:.2f} MB)")
 
 
 def main() -> None:
@@ -184,9 +190,18 @@ def main() -> None:
         default="models/flight_delay_model.pkl",
         help="Where to save the trained model.",
     )
+    parser.add_argument(
+        "--compress",
+        type=int,
+        default=None,
+        choices=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        help="Optional joblib compression level (3 recommended; 9 is slow, marginal gain).",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.compress is not None:
+        cfg.setdefault("training", {})["compress"] = args.compress
     X, y, cat_cols, num_cols = prepare_dataset(cfg)
     train_and_evaluate(X, y, cfg, args.model_output)
 

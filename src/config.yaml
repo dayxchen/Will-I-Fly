@@ -34,3 +34,8 @@ training:
   # If true, split train/test by date (later dates as test) instead of random split
   time_based_split: true
   model_type: "random_forest"  # or "xgboost" if you install it
+  # RandomForest size/accuracy knobs (max_depth: null = unlimited)
+  n_estimators: 200
+  max_depth: null
+  # joblib compression on save (3 ≈ 83MB from ~371MB; null = uncompressed)
+  compress: null
