@@ -1,0 +1,6 @@
+iata,airport_name,latitude,longitude,timezone,country_code,state_abr,airport_id
+SFO,San Francisco International,37.61882,-122.3758,America/Los_Angeles,US,CA,126296
+YVR,Vancouver International,49.19489,-123.17923,America/Vancouver,CA,BR,135105
+SAN,San Diego International Airport,32.73235,-117.19744,America/Los_Angeles,US,CA,126110
+LAX,Los Angeles International,33.94251,-118.40897,America/Los_Angeles,US,CA,116537
+KIX,Kansai International,34.42731,135.24406,Asia/Tokyo,JP,OS,115464
