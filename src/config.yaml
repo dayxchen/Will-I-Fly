@@ -1,0 +1,36 @@
+flights:
+  provider: aviationstack
+  api_url: "http://api.aviationstack.com/v1/flights"
+  api_key_env: "AVIATIONSTACK_API_KEY"
+
+data:
+  flights_csv_path: "T_ONTIME_REPORTING.csv"
+  # Optional: limit rows while testing to reduce weather API calls
+  max_rows: 50000
+
+weather:
+  provider: open-meteo
+  # Historical Forecast API includes visibility (m); ERA5 archive often returns null visibility.
+  archive_url: "https://historical-forecast-api.open-meteo.com/v1/forecast"
+  geocoding_url: "https://geocoding-api.open-meteo.com/v1/search"
+  # Stored feature units: temperature (°C), wind_speed (km/h), precipitation (mm), visibility (m)
+  feature_fields:
+    - "temperature"
+    - "wind_speed"
+    - "precipitation"
+    - "visibility"
+  hourly_variables:
+    - "temperature_2m"
+    - "wind_speed_10m"
+    - "precipitation"
+    - "visibility"
+  request_delay_seconds: 0.1
+
+training:
+  # Arrival delay in minutes at/above which a flight is considered delayed
+  delay_threshold_minutes: 15
+  test_size: 0.2
+  random_state: 42
+  # If true, split train/test by date (later dates as test) instead of random split
+  time_based_split: true
+  model_type: "random_forest"  # or "xgboost" if you install it

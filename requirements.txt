@@ -1,0 +1,9 @@
+numpy
+pandas
+scikit-learn
+requests
+pyyaml
+joblib
+tqdm
+fastapi
+uvicorn[standard]
