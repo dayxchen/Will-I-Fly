@@ -35,7 +35,7 @@ training:
   time_based_split: true
   model_type: "random_forest"  # or "xgboost" if you install it
   # RandomForest size/accuracy knobs (max_depth: null = unlimited)
-  n_estimators: 200
-  max_depth: null
-  # joblib compression on save (3 ≈ 83MB from ~371MB; null = uncompressed)
-  compress: null
+  n_estimators: 100
+  max_depth: 20
+  # joblib compression on save (3 ≈ 2MB for 100 trees / depth 20)
+  compress: 3
