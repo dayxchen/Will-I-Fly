@@ -13,11 +13,11 @@ __pycache__/
 data/
 *.parquet
 
-# Trained models (regenerate with train_model.py)
-models/*.pkl
+# Large / local-only model artifacts (GitHub limit is 100MB)
+models/flight_delay_model_compressed.pkl
+models/_compress_test_*.pkl
 
 # OS / editor
 .DS_Store
 .idea/
 .vscode/
-models/flight_delay_model.pkl
