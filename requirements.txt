@@ -7,3 +7,4 @@ joblib
 tqdm
 fastapi
 uvicorn[standard]
+shap>=0.44.0
