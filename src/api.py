@@ -40,6 +40,8 @@ from flight_parser import parse_flight_number
 
 from live_flights import LiveFlightService
 
+from shap_explain import explain_prediction
+
 
 
 # Load model once at startup (set MODEL_PATH env var or default)
@@ -190,11 +192,37 @@ class PredictRequest(BaseModel):
 
 
 
+class ShapFactor(BaseModel):
+
+    feature: str
+
+    impact: float
+
+    direction: str = Field(..., description="increases_delay or decreases_delay")
+
+
+
+
+
+class PredictionExplanation(BaseModel):
+
+    base_probability_delayed: float
+
+    summary: str
+
+    factors: List[ShapFactor]
+
+
+
+
+
 class PredictResponse(BaseModel):
 
     probability_delayed: float = Field(..., description="P(delay >= threshold), 0-1")
 
     delayed: bool = Field(..., description="True if probability_delayed >= 0.5")
+
+    explanation: Optional[PredictionExplanation] = None
 
 
 
@@ -207,6 +235,8 @@ class PredictionResult(BaseModel):
     delayed: bool
 
     model_available: bool = True
+
+    explanation: Optional[PredictionExplanation] = None
 
 
 
@@ -238,6 +268,36 @@ class FlightLookupResponse(BaseModel):
 
 
 
+def _prepare_predict_df(body: Dict[str, Any]) -> pd.DataFrame:
+
+    df = pd.DataFrame([body])
+
+    for col in ["OP_UNIQUE_CARRIER", "ORIGIN_STATE_ABR", "DEST_STATE_ABR", "DEST", "route"]:
+
+        df[col] = df[col].astype(str)
+
+    return df
+
+
+
+
+
+def _build_explanation(model, df: pd.DataFrame, delayed: bool) -> Optional[PredictionExplanation]:
+
+    try:
+
+        payload = explain_prediction(model, df, delayed=delayed)
+
+        return PredictionExplanation(**payload)
+
+    except Exception:
+
+        return None
+
+
+
+
+
 def _run_prediction(flight: Dict[str, Any]) -> Optional[PredictionResult]:
 
     try:
@@ -264,19 +324,17 @@ def _run_prediction(flight: Dict[str, Any]) -> Optional[PredictionResult]:
 
 
 
-    df = pd.DataFrame([body])
-
-    for col in ["OP_UNIQUE_CARRIER", "ORIGIN_STATE_ABR", "DEST_STATE_ABR", "DEST", "route"]:
-
-        df[col] = df[col].astype(str)
+    df = _prepare_predict_df(body)
 
     proba = float(model.predict_proba(df)[0, 1])
+
+    delayed = proba >= 0.5
 
     return PredictionResult(
 
         probability_delayed=round(proba, 4),
 
-        delayed=proba >= 0.5,
+        delayed=delayed,
 
         model_available=True,
 
@@ -432,16 +490,48 @@ def predict(body: PredictRequest):
 
     row = body.model_dump()
 
-    df = pd.DataFrame([row])
-
-    # Ensure categoricals are strings
-
-    for col in ["OP_UNIQUE_CARRIER", "ORIGIN_STATE_ABR", "DEST_STATE_ABR", "DEST", "route"]:
-
-        df[col] = df[col].astype(str)
+    df = _prepare_predict_df(row)
 
     proba = float(model.predict_proba(df)[0, 1])
 
-    return PredictResponse(probability_delayed=round(proba, 4), delayed=proba >= 0.5)
+    delayed = proba >= 0.5
+
+    return PredictResponse(
+
+        probability_delayed=round(proba, 4),
+
+        delayed=delayed,
+
+    )
+
+
+
+
+
+@app.post("/predict/explain", response_model=PredictionExplanation)
+
+def explain(body: PredictRequest):
+
+    try:
+
+        model = get_model()
+
+    except FileNotFoundError as e:
+
+        raise HTTPException(status_code=503, detail=str(e))
+
+    df = _prepare_predict_df(body.model_dump())
+
+    proba = float(model.predict_proba(df)[0, 1])
+
+    delayed = proba >= 0.5
+
+    explanation = _build_explanation(model, df, delayed)
+
+    if explanation is None:
+
+        raise HTTPException(status_code=500, detail="Could not generate SHAP explanation.")
+
+    return explanation
 
 
