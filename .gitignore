@@ -21,3 +21,6 @@ models/_compress_test_*.pkl
 .DS_Store
 .idea/
 .vscode/
+
+# Local archives
+Archive*.zip

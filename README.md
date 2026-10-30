@@ -1,144 +1,85 @@
-## Flight delay prediction project
+# Will I Fly?
 
-This project trains a machine learning model to predict whether a given **domestic flight** will be **delayed on arrival**, using:
+**Will I Fly?** tells you how likely your flight is to arrive late. Type in a flight number (for example `AA1002`), and the app looks up that flight, checks the current weather at the departure airport, and uses a machine learning model to estimate the chance it will land **15 or more minutes late**. It also explains which factors pushed the prediction up or down.
 
-- Historical **on-time performance** data (`T_ONTIME_REPORTING.csv`)
-- **Weather data** from your preferred weather API
+The app covers **US domestic flights**.
 
-The target label is a binary flag indicating whether the **arrival delay** is greater than or equal to a configured threshold (default: **15 minutes**).
+---
 
-### 1. Setup
+## How it works
 
-From the project root (`Will I Fly?`):
+```
+ Flight number ──► Live flight data ──► Weather at origin ──► ML model ──► Delay probability
+   "AA1002"         (Aviationstack)       (Open-Meteo)       (Random Forest)   + explanation (SHAP)
+```
+
+1. **You enter a flight number.** The app parses it into an airline code and number (`AA` + `1002`).
+2. **It finds the flight.** The backend asks the [Aviationstack](https://aviationstack.com) API for the flight's current or next leg: airline, origin, destination, and scheduled departure time.
+3. **It checks the weather.** Using the origin airport's location, it gets current temperature, wind speed, precipitation, and visibility from [Open-Meteo](https://open-meteo.com).
+4. **The model makes a prediction.** The flight details and weather go into a trained Random Forest model, which returns the probability of a delay. Anything at 50% or above is labeled "likely delayed."
+5. **It explains the result.** [SHAP](https://shap.readthedocs.io) breaks the prediction down into the factors that mattered most, such as the route, time of day, airline, or weather, and whether each one made a delay more or less likely.
+
+### How the model was trained
+
+- **Flight history:** US Department of Transportation on-time performance data (`T_ONTIME_REPORTING.csv`). Cancelled and diverted flights are removed, and each flight is labeled delayed if it arrived 15+ minutes late.
+- **Historical weather:** For each airport, date, and departure hour, the matching weather is pulled from Open-Meteo's historical API and cached in `data/weather_cache.csv`, so it only has to be fetched once.
+- **Features used:** airline, flight number, origin and destination airports and states, route, date (year, month, day, day of week), scheduled departure hour, and the four weather values.
+- **Model:** a scikit-learn Random Forest (100 trees, max depth 20), tested on later dates than it was trained on so the scores reflect how it does on future flights. The trained pipeline is saved to `models/flight_delay_model.pkl`.
+
+---
+
+## Project layout
+
+| Path | What it does |
+| --- | --- |
+| `src/api.py` | FastAPI backend that the website calls |
+| `src/live_flights.py` | Looks up live flights through Aviationstack |
+| `src/airport_geo.py` | Airport codes and locations, plus live weather |
+| `src/flight_parser.py` | Turns text like `"AA 1002"` into airline + number |
+| `src/flight_lookup.py` | Converts a flight record into model inputs |
+| `src/shap_explain.py` | Builds the "why" explanation for a prediction |
+| `src/data_prep.py` | Cleans the flight history and creates the delay label |
+| `src/weather_fetch.py` | Fetches and caches historical weather for training |
+| `src/train_model.py` | Trains and saves the model |
+| `src/compress_model.py` | Shrinks the saved model for deployment |
+| `src/config.yaml` | Settings for data paths, APIs, and training |
+| `frontend/` | Helper code for calling the API from the React frontend |
+| `models/` | Trained model files (stored with Git LFS) |
+| `vercel.json` | Deploys the API to Vercel |
+
+---
+
+## API endpoints
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/flights/lookup?flight=AA1002` | Main endpoint: finds a live flight and returns its delay prediction |
+| `POST` | `/predict` | Predicts from flight and weather details you supply yourself |
+| `POST` | `/predict/explain` | Same inputs as `/predict`, returns the SHAP explanation |
+| `GET` | `/health` | Shows whether the model is loaded and the flight API key is set |
+
+Interactive docs are at `/docs` when the server is running.
+
+---
+
+## Running it locally
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # macOS / Linux
-# .venv\Scripts\activate   # Windows PowerShell
-
+source .venv/bin/activate
 pip install -r requirements.txt
+
+# Needed for live flight lookups
+export AVIATIONSTACK_API_KEY="your_key"
+
+# Start the API at http://localhost:8000
+uvicorn api:app --reload --app-dir src --host 0.0.0.0
 ```
 
-### 2. Configure paths and weather API
-
-Edit `src/config.yaml`:
-
-- **`data.flights_csv_path`**: path to your `T_ONTIME_REPORTING.csv` file (relative or absolute).
-- **`data.max_rows`**: optional cap on the number of rows to use during development (helps limit API calls).
-- **`weather.base_url`**: base URL for your weather API endpoint.
-- **`weather.api_key_env`**: name of the environment variable that will hold your API key.
-- **`weather.query_params`**: query parameter names for airport, date, hour, and API key.
-- **`weather.feature_fields`**: list of field names to extract from the API JSON response.
-
-Export your weather API key in your shell, matching `weather.api_key_env`:
-
-```bash
-export WEATHER_API_KEY="your_real_api_key_here"
-```
-
-### 3. Data preparation (optional standalone step)
-
-You can run flight-only preparation and inspect the intermediate parquet:
-
-```bash
-python src/data_prep.py \
-  --csv "T_ONTIME_REPORTING.csv" \
-  --max_rows 50000 \
-  --delay_threshold 15 \
-  --output_parquet "data/flights_prepared.parquet"
-```
-
-This will:
-
-- Filter out cancelled and diverted flights.
-- Create a `delayed` label based on `ARR_DELAY >= delay_threshold`.
-- Engineer features like `dep_hour` and `route`.
-
-### 4. Weather fetching and caching
-
-The main training script automatically:
-
-1. Extracts unique `(date, origin_airport_id, dep_hour)` keys from the flight data.
-2. Fetches weather for each key from your API.
-3. Stores the results in `data/weather_cache.csv` so subsequent runs reuse existing data without re-calling the API.
-
-If you want to build the weather cache manually from the prepared parquet:
-
-```bash
-python src/weather_fetch.py \
-  --flights_parquet "data/flights_prepared.parquet" \
-  --base_url "https://your-weather-api.example.com/forecast" \
-  --feature_fields "temperature,wind_speed,precipitation,visibility" \
-  --cache_csv "data/weather_cache.csv"
-```
-
-You will likely need to adjust `--base_url`, `--feature_fields`, and the extraction logic inside `weather_fetch.py` to match your API’s schema.
-
-### 5. Train the model end-to-end
-
-With `src/config.yaml` updated and your API key set, run:
+To retrain the model (Open-Meteo needs no API key):
 
 ```bash
 python src/train_model.py --config src/config.yaml --model_output models/flight_delay_model.pkl
 ```
 
-The script will:
-
-- Load and prepare the flight data.
-- Merge in weather features using `data/weather_cache.csv` (creating or updating it as needed).
-- Split the data into train/test sets.
-- Train a `RandomForestClassifier`.
-- Print metrics (classification report and ROC-AUC).
-- Save the full preprocessing pipeline + model to `models/flight_delay_model.pkl`.
-
-### 6. Using the trained model
-
-`models/flight_delay_model.pkl` is a **scikit-learn pipeline**. To use it in your own code:
-
-```python
-import joblib
-import pandas as pd
-
-model = joblib.load("models/flight_delay_model.pkl")
-
-# Build a single-row DataFrame with the same feature columns used in training.
-# You must also attach corresponding weather features for that flight.
-sample = pd.DataFrame([{
-    "YEAR": 2025,
-    "MONTH": 1,
-    "DAY_OF_MONTH": 1,
-    "DAY_OF_WEEK": 3,
-    "OP_UNIQUE_CARRIER": "AA",
-    "OP_CARRIER_FL_NUM": 1002,
-    "ORIGIN_AIRPORT_ID": 13485,
-    "ORIGIN_STATE_ABR": "WI",
-    "DEST_AIRPORT_ID": 11057,
-    "DEST_STATE_ABR": "NC",
-    "DEST": "CLT",
-    "dep_hour": 6,
-    "route": "13485_11057",
-    "temperature": 20.0,
-    "wind_speed": 5.0,
-    "precipitation": 0.0,
-    "visibility": 10.0,
-}])
-
-pred_proba = model.predict_proba(sample)[:, 1][0]
-print(f"Predicted probability of delay: {pred_proba:.3f}")
-```
-
-You can wrap this in an API or UI to get real-time predictions for upcoming flights, as long as you can supply the same types of features (flight metadata + weather at departure time).
-
----
-
-### 7. Prediction API for your website
-
-If you're building a **website** and want to own the UI/UX, use the small HTTP API so your frontend can get predictions without touching Python.
-
-- **Next steps (what to run and when, API contract for your UI):** see **[NEXT_STEPS.md](NEXT_STEPS.md)**.
-- Start the API server (after training once):
-  ```bash
-  uvicorn api:app --reload --app-dir src --host 0.0.0.0
-  ```
-  Then open `http://localhost:8000/docs` for the interactive API docs. Your site calls `POST /predict` with the same feature fields as above.
-
+For connecting a React frontend, see [frontend/README.md](frontend/README.md) and [NEXT_STEPS.md](NEXT_STEPS.md).
