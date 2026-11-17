@@ -99,6 +99,19 @@ def _base_delay_probability(explainer: shap.TreeExplainer) -> float:
     return float(expected)
 
 
+def _validate_shap_row(row: np.ndarray, base: float, tol: float = 1e-6) -> None:
+    """Reject numerically broken SHAP output instead of showing it to users.
+
+    Contributions to a probability must be finite and, added to the base
+    value, land inside [0, 1].
+    """
+    if not np.all(np.isfinite(row)):
+        raise ValueError("SHAP values contain non-finite numbers")
+    total = base + float(row.sum())
+    if not (-tol <= total <= 1.0 + tol):
+        raise ValueError(f"SHAP values do not sum to a probability (got {total:.3g})")
+
+
 def _is_active_feature(feature_name: str, matrix_row: np.ndarray, idx: int) -> bool:
     """One-hot categoricals are only active for the flight's actual category."""
     if str(feature_name).startswith("cat__"):
@@ -160,8 +173,13 @@ def explain_prediction(
     matrix, feature_names = _transform_features(model, df)
     matrix_row = matrix[0]
     explainer = _get_explainer(model)
-    shap_values = explainer.shap_values(matrix, check_additivity=False)
+    # The full model's trees have no depth limit (some are 300+ levels deep),
+    # and exact TreeSHAP overflows on trees that deep (impacts around 1e37).
+    # The approximate (Saabas) method stays stable and still sums exactly to
+    # the prediction.
+    shap_values = explainer.shap_values(matrix, approximate=True, check_additivity=False)
     row = _extract_shap_row(shap_values)
+    _validate_shap_row(row, _base_delay_probability(explainer))
 
     ranked_idx = np.argsort(np.abs(row))[::-1]
     candidates: List[Dict[str, Any]] = []

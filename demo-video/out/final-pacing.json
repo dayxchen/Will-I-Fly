@@ -1,0 +1,11 @@
+{
+ "video": "out/final.mp4",
+ "duration": 12.0,
+ "change_steps": 75,
+ "longest_gap_s": 0.9,
+ "dead_gaps": [],
+ "hard_cuts": [],
+ "too_short_shots": [],
+ "flashes": [],
+ "pass": true
+}

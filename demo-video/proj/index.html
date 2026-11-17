@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:opsz,wght@6..96,400&family=Inter:wght@400;500;700&display=swap" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #FFF1E5; }
+      #root { position: relative; width: 1920px; height: 1080px; }
+      #stage { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="12" data-width="1920" data-height="1080">
+      <canvas id="stage" class="clip" width="1920" height="1080" data-start="0" data-duration="12" data-track-index="0"></canvas>
+    </div>
+    <script>
+      // ============================================================
+      // Will I Fly: a newspaper-style data story. One canvas, drawn as a pure function of time. 12 s, no loop.
+      // The data is REAL output of the Will I Fly model (models/flight_delay_model.pkl) for one flight,
+      // DL 468 Atlanta -> New York LaGuardia, Fri 17 Jan 2025, at every departure hour, clear vs snowstorm.
+      //   0.0-1.0  title rises, gridlines and axes draw in
+      //   1.0-3.5  ink line draws the clear-day delay chance through the day; big counter rides it
+      //   3.5-6.0  camera dives into the evening, ticks reflow to every hour, "14% late at 7 pm"
+      //   6.0-8.5  the accent line peels up out of the ink line: the same flight in a snowstorm; pull back out
+      //   9.0-12   "1.8×" lands in the open sky, a caliper at 7 pm shows the two numbers, light sweeps the gap
+      // ============================================================
+      window.__timelines = window.__timelines || {};
+      const DUR = 12;
+      const W = 1920, H = 1080;
+      const L = 216, R = 1720, T = 300, BOT = 920, PW = R - L, PH = BOT - T;
+      const PAPER = '#FFF1E5', INK = '#3A1F2D', GRID = '#E6D9CE', ACC = '#A8535B';
+      const INK_A = (a) => `rgba(58,31,45,${a})`, ACC_A = (a) => `rgba(168,83,91,${a})`;
+      const SANS = '"Inter", Arial, sans-serif';
+      const SERIF = '"Bodoni Moda", Georgia, serif';
+
+      // ---------- words ----------
+      const TITLE_WORDS = ['Will', 'I', 'fly', 'on', 'time?'];
+      const LABEL_FLIGHT = 'DL 468 · ATL → LGA';
+      const LABEL_COUNTER = 'on a clear day';
+      const LABEL_CALM = 'Clear day';
+      const LABEL_STORM = 'In a snowstorm';
+      const LABEL_PAYOFF = 'riskier in snow';
+
+      // ---------- REAL MODEL OUTPUT: % chance of arriving 15+ min late, by scheduled departure hour 5..23 ----------
+      const H0 = 5, H1 = 23;
+      const CALM = [3.5, 3.5, 3.0, 4.0, 4.0, 5.5, 5.5, 6.0, 6.5, 9.0, 12.0, 11.0, 12.0, 13.0, 13.5, 13.5, 13.5, 12.5, 11.5];
+      const STORM = [19.0, 19.0, 18.5, 15.5, 17.5, 20.0, 20.0, 18.5, 20.0, 22.0, 24.0, 24.5, 24.5, 24.5, 25.0, 24.5, 24.5, 24.5, 24.5];
+      const AT = 19; // 7 pm: the callout and the caliper
+      const YMAX = 50;
+
+      // smooth curve through the hourly points (Catmull-Rom)
+      const curve = (arr) => (h) => {
+        const f = Math.min(Math.max(h - H0, 0), arr.length - 1.0001);
+        const i = Math.floor(f), u = f - i;
+        const p0 = arr[Math.max(i - 1, 0)], p1 = arr[i], p2 = arr[i + 1], p3 = arr[Math.min(i + 2, arr.length - 1)];
+        return 0.5 * ((2 * p1) + (-p0 + p2) * u + (2 * p0 - 5 * p1 + 4 * p2 - p3) * u * u + (-p0 + 3 * p1 - 3 * p2 + p3) * u * u * u);
+      };
+      const calm = curve(CALM), storm = curve(STORM);
+      // every number on screen comes from these, so they always agree
+      const CALM_AT = Math.round(CALM[AT - H0]), STORM_AT = Math.round(STORM[AT - H0]);
+      const RATIO = Math.round((STORM_AT / CALM_AT) * 10) / 10;
+
+      const cv = document.getElementById('stage');
+      const mainCtx = cv.getContext('2d');
+      let ctx = mainCtx;
+      const fcv = document.createElement('canvas'); fcv.width = W; fcv.height = H;
+      const fctx = fcv.getContext('2d');
+
+      // ---------- helpers ----------
+      const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+      const lerp = (a, b, k) => a + (b - a) * k;
+      const seg = (t, a, b) => clamp((t - a) / (b - a));
+      const sstep = (a, b, v) => { const k = clamp((v - a) / (b - a)); return k * k * (3 - 2 * k); };
+      const E = {};
+      ['power2.out', 'power2.in', 'power2.inOut', 'power3.out', 'power3.inOut', 'expo.out', 'sine.inOut', 'back.out(2.2)']
+        .forEach(n => { E[n] = gsap.parseEase(n); });
+      const ez = (n, t, a, b) => E[n](seg(t, a, b));
+      function rng(seed) { return function () { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+      const fmtHour = (h) => h === 12 ? 'noon' : h < 12 ? `${h} am` : `${h - 12} pm`;
+
+      // ---------- paper texture (static, seeded) ----------
+      const paper = document.createElement('canvas');
+      paper.width = W + 160; paper.height = H + 160;
+      (function buildPaper() {
+        const p = paper.getContext('2d');
+        const pw = paper.width, ph = paper.height;
+        p.fillStyle = PAPER; p.fillRect(0, 0, pw, ph);
+        const r = rng(4242);
+        for (let i = 0; i < 140; i++) {
+          const x = r() * pw, y = r() * ph, rad = 120 + r() * 320;
+          const g = p.createRadialGradient(x, y, 0, x, y, rad);
+          const dark = r() < 0.5;
+          const a = 0.008 + r() * 0.012;
+          g.addColorStop(0, dark ? `rgba(150,96,50,${a})` : `rgba(255,252,246,${a * 1.6})`);
+          g.addColorStop(1, 'rgba(0,0,0,0)');
+          p.fillStyle = g; p.fillRect(x - rad, y - rad, rad * 2, rad * 2);
+        }
+        p.lineCap = 'round';
+        for (let i = 0; i < 2600; i++) {
+          const x = r() * pw, y = r() * ph, len = 6 + r() * 26, ang = r() * Math.PI;
+          const bend = (r() - 0.5) * 8;
+          const dark = r() < 0.55;
+          p.strokeStyle = dark ? `rgba(120,80,45,${0.035 + r() * 0.05})` : `rgba(255,255,250,${0.12 + r() * 0.18})`;
+          p.lineWidth = 0.6 + r() * 0.9;
+          const dx = Math.cos(ang) * len, dy = Math.sin(ang) * len;
+          p.beginPath(); p.moveTo(x, y); p.quadraticCurveTo(x + dx / 2 - dy / len * bend, y + dy / 2 + dx / len * bend, x + dx, y + dy); p.stroke();
+        }
+        const img = p.getImageData(0, 0, pw, ph); const d = img.data;
+        for (let i = 0; i < d.length; i += 4) {
+          const n = (r() - 0.5) * 9;
+          d[i] += n; d[i + 1] += n * 0.92; d[i + 2] += n * 0.8;
+        }
+        p.putImageData(img, 0, 0);
+      })();
+
+      // diagonal hatch for the gap (print detail)
+      const hatch = document.createElement('canvas');
+      hatch.width = 14; hatch.height = 14;
+      (function () {
+        const h = hatch.getContext('2d');
+        h.strokeStyle = ACC_A(0.55); h.lineWidth = 1.4;
+        for (const o of [-14, 0, 14]) { h.beginPath(); h.moveTo(o, 14); h.lineTo(o + 14, 0); h.stroke(); }
+      })();
+      const hatchPat = ctx.createPattern(hatch, 'repeat');
+
+      // ---------- camera: changes the axis range, never scales pixels ----------
+      const LN = Math.log;
+      function cam(t) {
+        const z = ez('power3.inOut', t, 3.5, 4.5) - ez('power3.inOut', t, 7.0, 8.0);
+        const xs = Math.exp(lerp(LN(H1 - H0), LN(9), z));
+        const x0 = lerp(H0, 14, z);
+        return { z, x0, xs, y0: 0, ys: YMAX };
+      }
+      const SX = (c, v) => L + (v - c.x0) / c.xs * PW;
+      const SY = (c, v) => BOT - (v - c.y0) / c.ys * PH;
+
+      // accent playhead (hours) and the peel-up amount
+      function accTip(t, c) {
+        if (t < 6.0) return H0;
+        const f1 = 0.9 * ez('expo.out', t, 6.0, 6.7);
+        const f = f1 + 0.1 * seg(t, 7.0, 8.5);
+        return Math.min(H1, c.x0 + f * c.xs);
+      }
+      const lift = (t, x) => E['power3.inOut'](seg(t - 0.35 * clamp((x - 14) / 9), 6.45, 7.0));
+      const accVal = (t, x) => { const b = calm(x); return b + lift(t, x) * (storm(x) - b); };
+
+      function linePath(c, fn, x1, x2) {
+        const a = Math.max(SX(c, x1), L - 40), b = SX(c, x2);
+        ctx.beginPath();
+        let first = true;
+        for (let px = a; px <= b + 0.01; px += 2.5) {
+          const v = c.x0 + (Math.min(px, b) - L) / PW * c.xs;
+          const y = SY(c, fn(v));
+          if (first) { ctx.moveTo(px, y); first = false; } else ctx.lineTo(px, y);
+        }
+        ctx.lineTo(b, SY(c, fn(x2)));
+      }
+
+      function haloText(str, x, y, fill, halo = 9) {
+        ctx.lineJoin = 'round';
+        ctx.strokeStyle = 'rgba(255,241,229,0.92)'; ctx.lineWidth = halo; ctx.strokeText(str, x, y);
+        ctx.fillStyle = fill; ctx.fillText(str, x, y);
+      }
+
+      function dot(x, y, col, s, a = 1) {
+        if (s <= 0 || a <= 0) return;
+        ctx.save();
+        ctx.globalAlpha = a;
+        ctx.shadowColor = 'rgba(70,40,15,0.30)'; ctx.shadowBlur = 14; ctx.shadowOffsetY = 6;
+        ctx.fillStyle = PAPER; ctx.beginPath(); ctx.arc(x, y, 16 * s, 0, Math.PI * 2); ctx.fill();
+        ctx.shadowColor = 'transparent';
+        ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, y, 10.5 * s, 0, Math.PI * 2); ctx.fill();
+        const g = ctx.createRadialGradient(x - 3 * s, y - 4 * s, 0, x, y, 10.5 * s);
+        g.addColorStop(0, 'rgba(255,255,255,0.28)'); g.addColorStop(0.6, 'rgba(255,255,255,0)');
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, 10.5 * s, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+      }
+      function ring(x, y, col, t, at) {
+        const k = seg(t, at, at + 0.7);
+        if (k <= 0 || k >= 1) return;
+        const e = E['power2.out'](k);
+        ctx.save();
+        ctx.strokeStyle = col; ctx.globalAlpha = 0.55 * (1 - e); ctx.lineWidth = 2.5 * (1 - e) + 0.8;
+        ctx.beginPath(); ctx.arc(x, y, 14 + 62 * e, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
+      }
+
+      // ---------- the frame: a pure function of time ----------
+      function draw(t) {
+        const c = cam(t);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+        // physical camera: slow push + a lean-in during the dive
+        const push = 1 + 0.012 * (t / DUR) + 0.028 * c.z + 0.035 * ez('sine.inOut', t, 8.8, DUR); // slow push through the payoff hold
+        const ox = 1100, oy = 600;
+        ctx.setTransform(push, 0, 0, push, ox - ox * push, oy - oy * push);
+
+        // paper + slow warm light
+        ctx.drawImage(paper, -80, -80);
+        const lx = lerp(420, 900, t / DUR), ly = lerp(180, 260, t / DUR);
+        let g = ctx.createRadialGradient(lx, ly, 0, lx, ly, 1300);
+        g.addColorStop(0, 'rgba(255,250,242,0.55)'); g.addColorStop(0.5, 'rgba(255,246,236,0.12)'); g.addColorStop(1, 'rgba(255,240,225,0)');
+        ctx.fillStyle = g; ctx.fillRect(-100, -100, W + 200, H + 200);
+        g = ctx.createRadialGradient(W * 0.45, H * 0.42, 500, W * 0.5, H * 0.5, 1250);
+        g.addColorStop(0, 'rgba(150,80,40,0)'); g.addColorStop(1, 'rgba(150,80,40,0.10)');
+        ctx.fillStyle = g; ctx.fillRect(-100, -100, W + 200, H + 200);
+
+        // ----- title block -----
+        const barW = 84 * ez('expo.out', t, 0.0, 0.5);
+        ctx.fillStyle = INK; ctx.fillRect(120, 82, barW, 10);
+        ctx.font = `400 88px ${SERIF}`; ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'left';
+        let wx = 120;
+        TITLE_WORDS.forEach((w, i) => {
+          const k = ez('power3.out', t, 0.1 + i * 0.09, 0.7 + i * 0.09);
+          ctx.save(); ctx.globalAlpha = k; ctx.fillStyle = INK;
+          ctx.fillText(w, wx, 186 + 26 * (1 - k));
+          ctx.restore();
+          wx += ctx.measureText(w + ' ').width;
+        });
+        {
+          const k = ez('power3.out', t, 0.55, 1.05);
+          ctx.save(); ctx.globalAlpha = k * 0.72;
+          ctx.font = `500 30px ${SANS}`; ctx.fillStyle = INK;
+          ctx.fillText(LABEL_FLIGHT, 122, 238 + 14 * (1 - k));
+          ctx.restore();
+        }
+
+        // ----- gridlines + y labels (every 10%) -----
+        for (let v = 0; v <= YMAX; v += 10) {
+          const y = SY(c, v);
+          const intro = ez('expo.out', t, 0.08 + (v / 10) * 0.07, 0.75 + (v / 10) * 0.07);
+          if (intro <= 0) continue;
+          if (v > 0) {
+            ctx.strokeStyle = GRID; ctx.globalAlpha = 1; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(L + PW * intro, y); ctx.stroke();
+          }
+          ctx.globalAlpha = clamp(intro * 1.6);
+          ctx.font = `400 26px ${SANS}`; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+          ctx.fillStyle = INK_A(0.62);
+          ctx.fillText(v === YMAX ? `${v}%` : String(v), L - 22 - 10 * (1 - intro), y);
+        }
+        ctx.globalAlpha = 1;
+
+        // ----- 7 pm marker (zoomed view) -----
+        const mk = ez('power3.out', t, 4.6, 5.1) * (1 - ez('power2.in', t, 7.0, 7.4));
+        if (mk > 0) {
+          const bx = SX(c, AT);
+          ctx.save();
+          ctx.strokeStyle = INK_A(0.55); ctx.lineWidth = 2; ctx.setLineDash([6, 8]);
+          ctx.beginPath(); ctx.moveTo(bx, T - 20); ctx.lineTo(bx, lerp(T - 20, BOT, mk)); ctx.stroke();
+          ctx.restore();
+        }
+
+        // ----- baseline + x ticks (hours; every 3 h zoomed out, every hour zoomed in) -----
+        const baseK = ez('expo.out', t, 0.35, 1.05);
+        ctx.strokeStyle = INK; ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.moveTo(L, BOT); ctx.lineTo(L + PW * baseK, BOT); ctx.stroke();
+        const visX = s => sstep(108, 150, s / c.xs * PW);
+        ctx.font = `400 26px ${SANS}`; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+        for (let v = H0; v <= H1; v++) {
+          let vis = visX(1);
+          if (v % 3 === 0) vis = Math.max(vis, visX(3));
+          if (vis <= 0.01) continue;
+          const x = SX(c, v);
+          if (x < L - 30 || x > R + 30) continue;
+          const xf = sstep(R + 30, R - 4, x) * sstep(L - 30, L + 4, x);
+          const intro = ez('power3.out', t, 0.5 + (v - H0) * 0.03, 0.95 + (v - H0) * 0.03);
+          const a = vis * xf * intro;
+          if (a <= 0.01) continue;
+          ctx.globalAlpha = a;
+          ctx.strokeStyle = INK; ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.moveTo(x, BOT); ctx.lineTo(x, BOT + 12); ctx.stroke();
+          ctx.fillStyle = INK_A(0.72);
+          ctx.fillText(fmtHour(v), x, BOT + 52 + 10 * (1 - intro) + 8 * (1 - vis));
+        }
+        ctx.globalAlpha = 1;
+
+        // ----- curves -----
+        const inkReveal = H0 + (H1 - H0) * ez('sine.inOut', t, 1.0, 3.5);
+        const tip = accTip(t, c);
+        const inkFade = 1 - 0.45 * ez('power2.inOut', t, 10.5, 11.1);
+
+        ctx.save();
+        ctx.beginPath(); ctx.rect(L - 30, T - 60, PW + 60, PH + 60); ctx.clip();
+
+        if (inkReveal > H0) {
+          linePath(c, calm, H0, inkReveal);
+          ctx.lineTo(SX(c, inkReveal), BOT); ctx.lineTo(Math.max(SX(c, H0), L - 40), BOT); ctx.closePath();
+          const wg = ctx.createLinearGradient(0, T, 0, BOT);
+          wg.addColorStop(0, INK_A(0.11)); wg.addColorStop(1, INK_A(0.035));
+          ctx.fillStyle = wg; ctx.globalAlpha = (1 - 0.45 * c.z) * (1 - 0.6 * ez('power2.inOut', t, 6.4, 7.2)); ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+
+        // the gap between clear day and snowstorm
+        if (tip > H0) {
+          const fillA = ez('power2.out', t, 6.45, 7.2) * (1 + 0.35 * ez('power2.inOut', t, 10.5, 11.1));
+          const tracePoly = () => {
+            linePath(c, x => accVal(t, x), H0, tip);
+            const a = Math.max(SX(c, H0), L - 40), b = SX(c, tip);
+            for (let px = b; px >= a - 0.01; px -= 2.5) {
+              const v = c.x0 + (Math.max(px, a) - L) / PW * c.xs;
+              ctx.lineTo(px, SY(c, calm(v)));
+            }
+            ctx.closePath();
+          };
+          const m = ctx.getTransform();
+          ctx = fctx;
+          ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, W, H);
+          ctx.setTransform(m);
+          tracePoly();
+          const fg = ctx.createLinearGradient(0, T, 0, BOT);
+          fg.addColorStop(0, ACC_A(0.30)); fg.addColorStop(1, ACC_A(0.10));
+          ctx.globalAlpha = clamp(fillA * 0.85); ctx.fillStyle = fg; ctx.fill();
+          ctx.globalAlpha = clamp(fillA * 0.5); ctx.fillStyle = hatchPat; ctx.fill();
+          ctx.globalAlpha = 1;
+          const soft = 1 - ez('power2.inOut', t, 8.1, 8.5);
+          if (soft > 0) {
+            const bx = SX(c, tip), fl = 150;
+            const hg = ctx.createLinearGradient(bx - fl, 0, bx + 2, 0);
+            hg.addColorStop(0, 'rgba(0,0,0,0)'); hg.addColorStop(1, `rgba(0,0,0,${soft})`);
+            ctx.globalCompositeOperation = 'destination-out';
+            ctx.fillStyle = hg; ctx.fillRect(bx - fl, T - 80, fl + 40, PH + 120);
+            ctx.globalCompositeOperation = 'source-over';
+          }
+          const shk = seg(t, 9.6, 11.95);
+          if (shk > 0 && shk < 1) {
+            const cx = lerp(L - 400, R + 400, E['power2.inOut'](shk));
+            const lg = ctx.createLinearGradient(cx - 220, T, cx + 220, T + 300);
+            lg.addColorStop(0, 'rgba(255,255,255,0)'); lg.addColorStop(0.5, 'rgba(255,255,255,0.75)'); lg.addColorStop(1, 'rgba(255,255,255,0)');
+            ctx.globalCompositeOperation = 'source-atop';
+            ctx.fillStyle = lg; ctx.fillRect(L - 40, T - 80, PW + 80, PH + 120);
+            ctx.globalCompositeOperation = 'source-over';
+          }
+          ctx = mainCtx;
+          ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(fcv, 0, 0); ctx.restore();
+          ctx.globalAlpha = 1;
+        }
+
+        if (inkReveal > H0) {
+          ctx.save();
+          ctx.globalAlpha = inkFade;
+          ctx.shadowColor = 'rgba(60,35,15,0.28)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 6;
+          ctx.strokeStyle = INK; ctx.lineWidth = 4.5; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+          linePath(c, calm, H0, inkReveal); ctx.stroke();
+          ctx.restore();
+        }
+        if (tip > H0) {
+          ctx.save();
+          ctx.shadowColor = 'rgba(90,30,40,0.30)'; ctx.shadowBlur = 12; ctx.shadowOffsetY = 7;
+          ctx.strokeStyle = ACC; ctx.lineWidth = 5.5; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+          linePath(c, x => accVal(t, x), H0, tip); ctx.stroke();
+          ctx.restore();
+        }
+        ctx.restore();
+
+        // ----- callout: "14% late at 7 pm" -----
+        const annIn = ez('power3.out', t, 5.0, 5.4);
+        const annOut = 1 - ez('power2.in', t, 6.0, 6.3);
+        if (annIn > 0 && annOut > 0) {
+          const lx0 = SX(c, AT) + 120, ly0 = SY(c, 26);
+          ctx.save();
+          ctx.globalAlpha = annIn * annOut;
+          const n = Math.round(CALM_AT * ez('power2.out', t, 5.0, 5.5));
+          ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+          ctx.font = `700 60px ${SANS}`;
+          const y0 = ly0 + 22 * (1 - annIn) - 10 * (1 - annOut);
+          haloText(`${n}%`, lx0, y0, INK, 12);
+          const w1 = ctx.measureText(CALM_AT + '%').width;
+          ctx.font = `400 60px ${SANS}`;
+          haloText(` late at ${fmtHour(AT)}`, lx0 + w1, y0, INK, 12);
+          ctx.restore();
+          const ak = ez('power2.inOut', t, 5.05, 5.55);
+          const p0 = { x: lx0 - 18, y: ly0 - 20 };
+          const p2 = { x: SX(c, AT) + 22, y: SY(c, calm(AT)) - 26 };
+          const p1 = { x: p0.x - 40, y: p0.y - 150 };
+          const q = (u) => ({ x: (1 - u) * (1 - u) * p0.x + 2 * (1 - u) * u * p1.x + u * u * p2.x, y: (1 - u) * (1 - u) * p0.y + 2 * (1 - u) * u * p1.y + u * u * p2.y });
+          if (ak > 0) {
+            ctx.save();
+            ctx.globalAlpha = annOut;
+            ctx.strokeStyle = INK; ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+            ctx.beginPath(); ctx.moveTo(p0.x, p0.y);
+            for (let u = 0.02; u <= ak + 1e-6; u += 0.02) { const pt = q(Math.min(u, ak)); ctx.lineTo(pt.x, pt.y); }
+            ctx.stroke();
+            if (ak > 0.9) {
+              const e = q(ak), pr = q(ak - 0.04);
+              const ang = Math.atan2(e.y - pr.y, e.x - pr.x);
+              const hl = 20 * E['back.out(2.2)'](seg(ak, 0.9, 1));
+              ctx.beginPath();
+              ctx.moveTo(e.x - hl * Math.cos(ang - 0.45), e.y - hl * Math.sin(ang - 0.45));
+              ctx.lineTo(e.x, e.y);
+              ctx.lineTo(e.x - hl * Math.cos(ang + 0.45), e.y - hl * Math.sin(ang + 0.45));
+              ctx.stroke();
+            }
+            ctx.restore();
+          }
+        }
+
+        // ----- series labels (lagged camera = follow-through) -----
+        const cl = cam(Math.max(0, t - 0.09));
+        const calmIn = ez('power3.out', t, 6.55, 7.0);
+        if (calmIn > 0) {
+          const v = cl.x0 + 0.62 * cl.xs;
+          const x = SX(cl, v), y = SY(cl, calm(v)) + 62 + 18 * (1 - calmIn);
+          ctx.save();
+          ctx.globalAlpha = calmIn * (1 - 0.4 * ez('power2.inOut', t, 10.5, 11.1));
+          ctx.font = `500 40px ${SANS}`; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+          haloText(LABEL_CALM, x, y, INK, 10);
+          ctx.restore();
+        }
+        const stormIn = ez('power3.out', t, 6.85, 7.3);
+        if (stormIn > 0) {
+          const v = cl.x0 + 0.36 * cl.xs;
+          const x = SX(cl, v), y = SY(cl, accVal(t, v)) - 40 - 18 * (1 - stormIn);
+          ctx.save();
+          ctx.globalAlpha = stormIn;
+          ctx.font = `700 42px ${SANS}`; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+          haloText(LABEL_STORM, x, y, ACC, 12);
+          ctx.restore();
+        }
+
+        // ----- dots, readouts, rings -----
+        ctx.font = `700 30px ${SANS}`; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+        {
+          const sIn = E['back.out(2.2)'](seg(t, 1.0, 1.3));
+          const aOut = 1 - ez('power2.in', t, 3.6, 3.9);
+          if (sIn > 0 && aOut > 0) {
+            const x = SX(c, inkReveal), y = SY(c, calm(inkReveal));
+            ctx.save();
+            ctx.globalAlpha = 0.45 * aOut * clamp(sIn);
+            ctx.strokeStyle = INK; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.moveTo(x, y + 18); ctx.lineTo(x, BOT); ctx.stroke();
+            ctx.restore();
+            ring(x, y, INK, t, 1.0);
+            ring(x, y, INK, t, 3.5);
+            dot(x, y, INK, lerp(0.6, 1, sIn), aOut * clamp(sIn * 2));
+          }
+        }
+        {
+          const s = E['back.out(2.2)'](seg(t, 4.95, 5.3));
+          const a = 1 - ez('power2.in', t, 6.0, 6.3);
+          if (s > 0 && a > 0) {
+            const x = SX(c, AT), y = SY(c, calm(AT));
+            ring(x, y, INK, t, 5.0);
+            dot(x, y, INK, lerp(0.6, 1, s), a * clamp(s * 2));
+          }
+        }
+        // accent playhead: rides the peel, then settles
+        if (t >= 6.0) {
+          const s = E['back.out(2.2)'](seg(t, 6.0, 6.3));
+          const fade = 1 - ez('power2.in', t, 8.3, 8.6);
+          const x = SX(c, tip), y = SY(c, accVal(t, tip));
+          ring(x, y, ACC, t, 6.0);
+          dot(x, y, ACC, lerp(0.6, 1, s) * lerp(0.6, 1, fade), clamp(s * 2) * lerp(0.0, 1, fade));
+          if (fade > 0) {
+            ctx.save(); ctx.globalAlpha = clamp(s * 2) * fade;
+            haloText(`${Math.round(accVal(t, tip))}%`, x + 24, y - 30, ACC, 9);
+            ctx.restore();
+          }
+        }
+        // end: caliper at 7 pm with both numbers
+        {
+          const s = E['back.out(2.2)'](seg(t, 8.5, 8.8));
+          if (s > 0) {
+            const x = SX(c, AT), yb = SY(c, calm(AT)), ya = SY(c, accVal(t, AT));
+            const ck = ez('power3.out', t, 8.5, 9.0);
+            ctx.save();
+            ctx.strokeStyle = ACC; ctx.lineWidth = 3;
+            ctx.beginPath(); ctx.moveTo(x, ya); ctx.lineTo(x, lerp(ya, yb, ck)); ctx.stroke();
+            ctx.restore();
+            ring(x, ya, ACC, t, 8.5);
+            ring(x, ya, ACC, t, 10.0);
+            ring(x, ya, ACC, t, 11.0);
+            ring(x, yb, INK, t, 10.5);
+            dot(x, ya, ACC, lerp(0.6, 1, s), clamp(s * 2));
+            dot(x, yb, INK, lerp(0.6, 1, s), clamp(s * 2) * lerp(1, 0.75, 1 - inkFade));
+            ctx.save();
+            ctx.globalAlpha = clamp(s * 2);
+            ctx.textAlign = 'right';
+            haloText(`${STORM_AT}%`, x - 30, ya - 4 - 8 * (1 - s), ACC, 9);
+            ctx.globalAlpha = clamp(s * 2) * inkFade;
+            haloText(`${CALM_AT}%`, x - 30, yb + 4 + 8 * (1 - s), INK, 9);
+            ctx.restore();
+          }
+        }
+
+        // ----- big serif figure: ink counter during the draw, accent ratio at the end -----
+        const bigNum = (str, suffix, col, alpha, by, shadowCol) => {
+          const rx = 1700;
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'left';
+          const big = `400 316px ${SERIF}`, small = `400 150px ${SERIF}`;
+          ctx.font = big; const wd = ctx.measureText(str).width;
+          ctx.font = small; const ws = ctx.measureText(suffix).width;
+          const x = rx - (wd + ws + 10);
+          ctx.shadowColor = shadowCol; ctx.shadowBlur = 26; ctx.shadowOffsetY = 14;
+          ctx.fillStyle = col;
+          ctx.font = big; ctx.fillText(str, x, by);
+          ctx.font = small; ctx.fillText(suffix, x + wd + 10, by - 122);
+          ctx.restore();
+        };
+        {
+          const k = ez('power3.out', t, 1.0, 1.45);
+          const out = ez('power2.in', t, 3.55, 3.95);
+          if (k > 0 && out < 1) {
+            const by = 640 + 30 * (1 - k) - 40 * out;
+            bigNum(String(Math.round(calm(inkReveal))), '%', INK, k * (1 - out), by, 'rgba(60,35,15,0.20)');
+            const lk = ez('power3.out', t, 1.2, 1.7);
+            ctx.save();
+            ctx.globalAlpha = lk * (1 - out);
+            ctx.font = `500 34px ${SANS}`; ctx.textAlign = 'right'; ctx.textBaseline = 'alphabetic';
+            ctx.fillStyle = INK_A(0.78);
+            ctx.fillText(LABEL_COUNTER, 1700, by + 64 + 14 * (1 - lk));
+            ctx.restore();
+          }
+        }
+        const nk = ez('power3.out', t, 9.0, 9.5);
+        if (nk > 0) {
+          const n = (1 + (RATIO - 1) * ez('expo.out', t, 9.0, 10.0)).toFixed(1);
+          const by = 470 + 34 * (1 - nk);
+          bigNum(n, '×', ACC, nk, by, 'rgba(90,30,40,0.24)');
+          const rk = ez('expo.out', t, 10.0, 10.6);
+          if (rk > 0) { ctx.fillStyle = ACC; ctx.fillRect(1700 - 380 * rk, by + 40, 380 * rk, 4); }
+          const lk = ez('power3.out', t, 10.1, 10.6);
+          ctx.save();
+          ctx.globalAlpha = lk;
+          ctx.font = `500 34px ${SANS}`; ctx.textAlign = 'right'; ctx.textBaseline = 'alphabetic';
+          ctx.fillStyle = INK_A(0.78);
+          ctx.fillText(LABEL_PAYOFF, 1700, by + 86 + 14 * (1 - lk));
+          ctx.restore();
+        }
+      }
+
+      const tl = gsap.timeline({ paused: true });
+      const p = { t: 0 };
+      tl.to(p, { t: DUR, duration: DUR, ease: 'none', onUpdate: () => draw(p.t) }, 0);
+      window.__timelines['main'] = tl;
+      draw(0);
+      tl.seek(0);
+      Promise.all(['400 88px "Bodoni Moda"', '400 26px "Inter"', '500 40px "Inter"', '700 42px "Inter"']
+        .map(f => document.fonts.load(f))).then(() => draw(p.t));
+    </script>
+  </body>
+</html>
